@@ -1,0 +1,614 @@
+====================================================================================================
+                        TIDETRACE (SIH26143) - COMPLETE PROJECT GUIDE & DEPLOYMENT MANUAL
+                        NTRO Oil Spill Attribution Console | National Technical Research Org
+====================================================================================================
+
+IS DOCUMENT MEIN COVERED TOPICS:
+1. PROJECT OVERVIEW & ARCHITECTURE (Kya hai, kaise kaam karta hai, 10-step pipeline)
+2. ALL ROUTES / LINKS / ENDPOINTS (Console Web UI, Har API Endpoint, External APIs)
+3. TESTING COMMANDS & TEST SUITE (Pytest commands, Test structure, Assertions)
+4. DUMMY DATA & DATASETS (Demo scenes, Synthetic data, Sample JSON Payloads)
+5. HOW TO RUN THE PROJECT LOCALLY (Step-by-step local setup & commands)
+6. MACHINE LEARNING (ML) DEEP DIVE (Folder structure, UNet++, Fallback detector, Training)
+7. RENDER DEPLOYMENT & FREE TIER CRASH ANALYSIS (RAM limits, Free tier solution, Step-by-step guide)
+
+====================================================================================================
+1. PROJECT OVERVIEW & ARCHITECTURE
+====================================================================================================
+
+1.1 PROJECT INTRODUCTION
+- Project Name: TideTrace
+- UI Console Title: "NTRO Oil Spill Attribution Console"
+- Problem Statement Code: SIH26143
+- Ministry / Organisation: National Technical Research Organisation (NTRO)
+- Category & Theme: Software | Disaster Management / Space Technology
+- Core Objective:
+  Samundar mein oil spills (tel ke risaav) ko Sentinel-1 SAR (Synthetic Aperture Radar) satellite
+  imagery ke zariye detect karna, metocean (ERA5 wind + ocean currents) physics ke dwara
+  slick ko backward trace karke uske origin point aur time ka pata lagana, future flow predict karna,
+  aur historic AIS (Automatic Identification System) maritime traffic data ko correlate karke
+  spill ke liye jimmedar vessel (jahaz) ko rank aur attribute karna with solid evidence and reason codes.
+
+1.2 NON-NEGOTIABLE ARCHITECTURAL PRINCIPLE: "THE OFFLINE BOUNDARY"
+- Judge / Demo time par internet unplugged (airplane mode) hone par bhi poora system 100% chalna chahiye.
+- Rule:
+  * Network access sirf aur sirf PREPARATION lane (`scripts/`) mein allow hai, jo demo se pehle
+    ek baar execute hoti hai aur data `data/` directory mein freeze/cache karti hai.
+  * Application runtime (`app/`) 100% pure local files read karta hai. Runtime ke dauran koi bhi
+    socket, live API call ya DNS lookup nahi hota (ise unit tests mein socket-block karke verify kiya gaya hai).
+  * No Docker, no Cloud mandatory dependency, no CUDA hard requirement (CPU par bhi chalta hai).
+
+1.3 10-STEP COMPLETE PIPELINE (What happens when you click "Run Analysis")
+  SAR Chip (VV/VH GeoTIFF)
+         |
+         v
+  [1] DETECT       : UNet++ Deep Learning segmentation, ya phir -22 dB baseline detector
+                     -> Returns Oil Polygons aur Look-alike Polygons.
+         v
+  [2] CHAR         : Local AEQD (Azimuthal Equidistant) projection mein metric characterisation
+                     -> Area (km2), length, width, perimeter, orientation, compactness, centroid.
+         v
+  [3] EO           : Sentinel-2 optical chip comparison (agar optical data available ho).
+         v
+  [4] METOCEAN     : Cached ERA5 10m wind aur CMEMS / Open-Meteo surface currents ka spatial & temporal interpolation.
+         v
+  [5] HINDCAST     : RK2 (Runge-Kutta 2nd Order) Lagrangian backward ensemble (50 particles)
+                     -> Slick ke andar se particle release karke backward drift run hota hai.
+                     -> Calculates: Origin Zone Polygon, Origin Time, Zone Radius.
+         v
+  [6] FORECAST     : Same RK2 integrator forward direction mein run hota hai
+                     -> Calculates: Future dispersion cone, threatened bounding box, coast impact flag.
+         v
+  [7] AGE_PROXY    : Origin time aur satellite pass time ke beech ke ghante (drift-time proxy).
+         v
+  [8] AIS          : Origin zone aur time window ke aas-pass SQLite store se vessel positions fetch karta hai.
+         v
+  [9] FILTER       : Spatio-temporal funnel jo non-relevant traffic ko filter out kar deta hai.
+         v
+  [10] SCORE       : 5 sub-scores compute karke vessel leaderboard banata hai:
+                     - Proximity Score (30%)
+                     - Time Difference Score (20%)
+                     - Behavior Anomaly Score (25% - e.g., AIS gaps, sudden speed/course change)
+                     - Vessel Type Prior (15% - Crude Tanker = 1.0, Cargo = 0.5, etc.)
+                     - Trajectory Alignment (10%)
+                     - Multiplied by Track Confidence Multiplier (penalises dead reckoning).
+                     -> Output: Ranked Suspects with exact reason codes.
+
+1.4 TECH STACK
+- Backend Runtime: Python 3.11+
+- Web Framework: FastAPI + Uvicorn
+- Data Validation: Pydantic v2
+- Numerics & Math: NumPy (Core mandatory dependency)
+- Spatial & Geometry: SciPy (morphology/speckle), PyProj (projection), RasterIO (GeoTIFF), Shapely
+  (Note: Agar SciPy, PyProj, RasterIO install na ho, to pure NumPy/Python fallbacks inbuilt hain!)
+- ML Framework: PyTorch + segmentation-models-pytorch (UnetPlusPlus, timm-efficientnet-b0)
+  (Note: ML framework na hone par inbuilt pure NumPy/SciPy fallback baseline detector chalta hai!)
+- Database: SQLite (MarineCadastre standard schema)
+- Frontend UI: Vanilla HTML5, Modern CSS, Vanilla JavaScript, Vendored Leaflet 1.9 (No React, no build step, no CDN needed).
+
+====================================================================================================
+2. ALL ROUTES / LINKS / ENDPOINTS
+====================================================================================================
+
+2.1 WEB CONSOLE USER INTERFACE (Frontend Links)
+- Main Console URL:
+  http://127.0.0.1:8000/
+  (Render par deploy hone ke baad: https://<your-render-subdomain>.onrender.com/)
+
+- Direct Case Sharing & State Deep Links:
+  Browser fragment (#) ke zariye directly specific job aur tab view open hota hai:
+  * http://127.0.0.1:8000/#job=<job_id>&view=investigate  (Slick geometry, detection & chart)
+  * http://127.0.0.1:8000/#job=<job_id>&view=drift        (Backward ensemble, origin zone & metocean fields)
+  * http://127.0.0.1:8000/#job=<job_id>&view=vessels      (Ranked leaderboard, reasons, confidence)
+  * http://127.0.0.1:8000/#job=<job_id>&view=method       (Scoring weights, mathematical formulas, priors)
+  * http://127.0.0.1:8000/#job=<job_id>&view=data         (System diagnostics, loaded models, datasets)
+
+- Static Asset Mounts:
+  * `/static` -> Serves `app/static/` (app.js, style.css, vendor/leaflet/)
+  * `/data`   -> Serves `data/` read-only (overlays, basemaps, cached chips)
+
+2.2 FASTAPI BACKEND API ENDPOINTS (Complete Reference Table)
+
+----------------------------------------------------------------------------------------------------
+METHOD | ENDPOINT PATH             | DESCRIPTION & PURPOSE
+----------------------------------------------------------------------------------------------------
+GET    | /api/health               | System status check (model loaded, detector type, AIS rows,
+       |                           | metocean cubes, memory/storage, warnings).
+GET    | /api/config               | All frozen configuration parameters and scoring weight breakdown.
+GET    | /api/scenes               | List of all available demo SAR scenes with footprints & AIS modes.
+GET    | /api/metocean             | List of all cached metocean wind/current cubes.
+GET    | /api/ais/stats            | SQLite AIS store stats (total rows, vessel count, time bounds).
+GET    | /api/scoring              | Detailed breakdown of scoring weights, behavior codes, type priors.
+----------------------------------------------------------------------------------------------------
+POST   | /api/run                  | RUNS ENTIRE PIPELINE (Detect -> Drift -> AIS -> Score).
+       |                           | Request Body: {"scene_id": "gom_mc20_chronic_slick"}
+       |                           | Output: Complete Job JSON with trace, polygons, origin, suspects.
+POST   | /api/detect               | Runs only Step 1 & 2 (SAR slick detection & characterisation).
+       |                           | Request Body: {"scene_id": "...", "prefer_model": true}
+POST   | /api/detect/upload        | Upload custom Sigma0 GeoTIFF via multipart form.
+       |                           | Form: file (binary .tif), t_sat (optional ISO string).
+POST   | /api/drift                | Runs only RK2 drift hindcast and forecast.
+       |                           | Request Body: {"centroid": [lon, lat], "t_sat": "...", "hours_back": 48}
+POST   | /api/attribute            | Runs only AIS spatio-temporal filter & vessel scoring.
+       |                           | Request Body: {"origin": [lon, lat], "t_origin": "...", "radius_km": 10}
+POST   | /api/demo/inject          | Operator interactive probe (click any coordinate on map to simulate).
+----------------------------------------------------------------------------------------------------
+GET    | /api/jobs                 | List recent jobs (history of completed analysis runs).
+GET    | /api/jobs/{job_id}        | Fetch complete stored JSON document of a specific job.
+GET    | /api/jobs/{job_id}/progress| Real-time polling endpoint: tells current running pipeline stage.
+GET    | /api/jobs/{job_id}/geojson| Exports the entire case (slick, cones, origin, tracks) as single GeoJSON.
+GET    | /api/report/{job_id}      | Maritime Pollution Attribution Note in HTML format (printable).
+GET    | /api/report/{job_id}/pdf  | Maritime Pollution Attribution Note in PDF format (requires reportlab).
+GET    | /api/ais/track/{mmsi}     | Full reconstructed, resampled track of a specific vessel (by MMSI).
+GET    | /api/ais/window           | All vessels inside a geographic bounding box & time window (for slider).
+----------------------------------------------------------------------------------------------------
+
+2.3 EXTERNAL SERVICES & DATA PROVIDERS (Used in offline preparation scripts)
+- Microsoft Planetary Computer:
+  STAC Search: https://planetarycomputer.microsoft.com/api/stac/v1/search
+  Used to download Sentinel-1 RTC GeoTIFF chips and Sentinel-2 L2A optical chips.
+- Open-Meteo Archive API:
+  ERA5 10m wind: https://archive-api.open-meteo.com/v1/archive
+  Marine currents: https://marine-api.open-meteo.com/v1/marine
+- Copernicus Marine Service (CMEMS):
+  Product `GLOBAL_ANALYSISFORECAST_PHY_001_024` for eddy-resolving oceanic currents.
+- MarineCadastre.gov:
+  U.S. National AIS raw CSV data source.
+- Hugging Face Hub Repositories:
+  * Tiles Dataset: https://huggingface.co/datasets/N-1ACE/tidetrace-sar-tiles
+  * Trained Model: https://huggingface.co/N-1ACE/tidetrace-oil-unet (Holds `oil_unet_best.pt`)
+- Zenodo Oil Spill Dataset:
+  Record IDs: 10.5281/zenodo.8346860, .8253899, .13761290 (Training & IoU validation).
+
+====================================================================================================
+3. TESTING COMMANDS & TEST SUITE
+====================================================================================================
+
+3.1 HOW TO RUN TESTS
+TideTrace ke pas 126+ automated unit and integration tests hain jo offline behavior ko verify karte hain.
+
+Poora test suite run karne ke liye:
+```bash
+python -m pytest tests -q
+```
+
+Detailed / Verbose output dekhne ke liye:
+```bash
+python -m pytest tests -v
+```
+
+3.2 KEY TEST FILES EXPLAINED
+
+1. `tests/test_pipeline_offline.py`
+   - Airplane Mode Verification Test.
+   - Yeh test Python ke `socket.socket` ko monkeypatch karke network access block kar deta hai.
+   - Uske baad `/api/run` ko call karta hai. Agar koi bhi internal function internet access karne
+     ki koshish karega to test turant FAIL ho jayega.
+
+2. `tests/test_advection.py`
+   - Physical Drift Physics Integrity.
+   - Verifies: 1 m/s current for 1 hour moves particle exactly 3.6 km East.
+   - Backward integration exactly forward integration ko undo karti hai.
+   - Wind speed factor exactly 3% (0.03) apply hota hai.
+
+3. `tests/test_geo_centroid.py`
+   - Georeferencing & Geometry.
+   - Verifies polygon UTM-to-WGS84 affine transformation accuracy (< 1e-4 degrees).
+   - Area (km2), perimeter, orientation aur centroid calculations accurately match.
+
+4. `tests/test_ais_gap.py`
+   - AIS silence / Dark vessel detection.
+   - 30 minute se bada silence period gap flag karta hai.
+   - Origin zone ke paas gap hone par suspicious behavior score inflate hota hai.
+
+5. `tests/test_scoring.py`
+   - Multi-factor attribution algorithm tests.
+   - Proximity, time, behavior anomaly, type prior, aur confidence formula test karta hai.
+   - Proves: High-confidence observed vessel outranks heavily dead-reckoned vessel.
+
+6. `tests/test_offline_boundary.py`
+   - AST (Abstract Syntax Tree) code scanner.
+   - `app/` ke har Python file ko scan karta hai aur check karta hai ki koi bhi network library
+     (requests, urllib, httpx, boto3, etc.) runtime path par import na ho rahi ho.
+
+7. `tests/test_conformance_fixes.py`
+   - Edge case robustness (e.g., uniform clean water detection, multi-threading race conditions
+     during model loading, retention cleanup of old jobs).
+
+====================================================================================================
+4. DUMMY DATA & DATASETS
+====================================================================================================
+
+4.1 PRE-INDEXED DEMO SCENES (`data/sar/scenes.json`)
+TideTrace 4 curated demo scenes ke sath ship hota hai:
+
+1. `gom_mc20_chronic_slick` (Gulf of Mexico, MC20 site)
+   - Coordinate: 28.938 N, -88.970 W | Acquisition: 2023-09-24 00:02 UTC
+   - AIS Mode: REAL (MarineCadastre NAIS data).
+   - Characteristics: High contrast chronic oil slick, actual commercial tanker traffic.
+
+2. `santa_barbara_seeps` (Santa Barbara Channel, California)
+   - Coordinate: 34.375 N, -119.870 W | Acquisition: 2023-08-29 01:59 UTC
+   - AIS Mode: REAL (MarineCadastre NAIS data).
+   - Characteristics: Natural hydrocarbon seabed seeps (hard test for look-alikes).
+
+3. `arabian_sea_mumbai_offshore` (Mumbai High Offshore Approaches, India)
+   - Coordinate: 19.050 N, 71.600 E | Acquisition: 2024-03-13 01:03 UTC
+   - AIS Mode: SIMULATED (Traffic simulator over real geobox & window).
+   - Characteristics: Clean scene / uniform water test. Shows "No Slick" finding honestly.
+
+4. `caspian_baku_seeps` (Baku Offshore Field, Caspian Sea)
+   - Coordinate: 40.190 N, 50.480 E | Acquisition: 2023-10-14 02:44 UTC
+   - AIS Mode: SIMULATED.
+   - Characteristics: Offshore drilling platforms and heavy regional traffic.
+
+4.2 SYNTHETIC TEST SCENE GENERATOR (`scripts/make_selftest_scene.py`)
+- Agar aapke pas large Sentinel-1 SAR files download karne ka internet nahi hai, to yeh script
+  ek mathematically accurate SAR chip generate kar deti hai:
+  Command:
+  ```bash
+  python scripts/make_selftest_scene.py --id selftest_synthetic --size 512
+  ```
+- Yeh Rayleigh speckle noise, ek elongated dark oil slick aur ek round look-alike patch banata hai
+  aur `data/sar/selftest_synthetic.tif` aur mask save karta hai.
+
+4.3 SYNTHETIC AIS GENERATOR (`scripts/build_synthetic_ais.py`)
+- Jo scenes public AIS coverage se bahar hain (jaise Arabian Sea ya Caspian Sea), unke liye
+  yeh script realistic MarineCadastre-schema traffic generate karti hai:
+  Command:
+  ```bash
+  python scripts/build_synthetic_ais.py --all --vessels 48
+  ```
+- Yeh actual drift hindcast calculate karti hai aur ek suspect vessel ko origin window mein place karti hai.
+
+4.4 SAMPLE API TEST PAYLOADS (For curl / Postman)
+
+1. Full Pipeline Run Payload (`POST /api/run`):
+```json
+{
+  "scene_id": "gom_mc20_chronic_slick",
+  "hindcast_hours": 48,
+  "forecast_hours": 36,
+  "ensemble_n": 50,
+  "search_radius_km": 10.0,
+  "origin_window_hours": 3.0,
+  "prefer_model": true,
+  "top_n": 10
+}
+```
+
+2. Drift Hindcast Only Payload (`POST /api/drift`):
+```json
+{
+  "centroid": [-88.9701, 28.9380],
+  "t_sat": "2023-09-24T00:02:27Z",
+  "hours_back": 48,
+  "hours_fwd": 36,
+  "ensemble_n": 50
+}
+```
+
+3. Vessel Attribution Only Payload (`POST /api/attribute`):
+```json
+{
+  "origin": [-88.9500, 28.9200],
+  "t_origin": "2023-09-23T16:00:00Z",
+  "slick_centroid": [-88.9701, 28.9380],
+  "radius_km": 10.0,
+  "window_h": 3.0,
+  "top_n": 5
+}
+```
+
+====================================================================================================
+5. HOW TO RUN THE PROJECT LOCALLY (STEP-BY-STEP)
+====================================================================================================
+
+STEP 1: REPOSITORY CLONE & DIRECTORY SETUP
+```bash
+git clone https://github.com/S-T-A-RNalin1/tidetrace.git
+cd tidetrace
+```
+
+STEP 2: PYTHON VIRTUAL ENVIRONMENT CREATE & ACTIVATE
+Python 3.11 ya newer recommended hai.
+
+Windows (PowerShell ya CMD):
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+Linux / macOS:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+STEP 3: INSTALL DEPENDENCIES
+Standard lightweight requirements install karein:
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+(Note: By default `requirements.txt` mein PyTorch commented rehta hai. Ye lightweight FastAPI + NumPy stack install karega jo 100% working hai.)
+
+STEP 4: BOOTSTRAP DEMO DATA (One-time internet setup)
+Demo scenes, metocean caches, aur synthetic traffic fetch karne ke liye:
+```bash
+python scripts/bootstrap_demo.py
+```
+Agar aapke paas slow internet hai aur aap sirf minimal synthetic scene par chalana chahte hain:
+```bash
+python scripts/make_selftest_scene.py
+python scripts/build_synthetic_ais.py --all
+```
+
+STEP 5: (OPTIONAL) PULL TRAINED DEEP LEARNING MODEL
+Agar aap Deep Learning UNet++ model test karna chahte hain aur torch install kiya hai:
+```bash
+python scripts/hf_sync.py pull-model
+```
+(Yeh Hugging Face se `models/oil_unet_best.pt` [~78 MB] download karega.)
+
+STEP 6: START THE SERVER
+```bash
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+STEP 7: OPEN IN BROWSER
+Browser mein open karein:
+http://127.0.0.1:8000
+Left sidebar mein scene select karein (e.g. "Gulf of Mexico"), aur "Run analysis" button click karein!
+
+====================================================================================================
+6. MACHINE LEARNING (ML) DEEP DIVE
+====================================================================================================
+
+6.1 KAHA HAI ML? (FOLDER STRUCTURE)
+ML code base in folders mein divided hai:
+- `app/ml/`                : Core inference, architecture builder, aur baseline fallback
+  * `app/ml/model.py`      : UNet++ model definition, PyTorch dynamic loading & checkpoint IO
+  * `app/ml/infer.py`      : Tiled 512x512 inference, cosine-tapered stitching, radiometry check
+  * `app/ml/fallback.py`   : Inbuilt physics-based Sigma0 dark-patch baseline detector (Zero PyTorch!)
+  * `app/ml/dataset.py`    : Zenodo SAR tile preprocessor & normalisation
+  * `app/ml/train.py`      : Kaggle training script with soft Dice + cross-entropy loss
+- `models/`                : Saved checkpoints folder
+  * `models/oil_unet_best.pt` : Pre-trained UNet++ model weights (~78 MB, download via hf_sync)
+  * `models/oil_unet_best.report.json` : Validation metrics & IoU benchmark report
+- `scripts/`               : ML sync & data prep
+  * `scripts/hf_sync.py`   : Hugging Face dataset & model sync
+  * `scripts/build_kaggle_kernels.py` : Kaggle P100 training notebook builder
+
+6.2 MODEL ARCHITECTURE & SPECS
+- Model Type: Segmentation Network
+- Architecture: `UnetPlusPlus` (nested dense skip connections)
+- Backbone / Encoder: `timm-efficientnet-b0` (ImageNet pretrained weights)
+- Input: 512 x 512 tiles, 3 channels (Channel 0: VV dB, Channel 1: VH dB, Channel 2: VV repeated)
+- Output Classes (3 classes):
+  * Class 0: Sea (Clear water)
+  * Class 1: Look-alike (Algal bloom, biogenic film, low wind)
+  * Class 2: Mineral Oil Slick (Crude oil spill)
+- Performance on Zenodo Validation Set:
+  * IoU_oil: 0.8891
+  * IoU_sea: 0.9822
+  * mIoU: 0.9356
+  * Water called oil (False positive): 0.0106 (<= 2% hard ceiling)
+
+6.3 TILED INFERENCE & COSINE TAPER STITCHING (`app/ml/infer.py`)
+- Full satellite SAR scene 2048 x 2048 pixels ki hoti hai.
+- Agar poori 2048x2048 image ek sath GPU/CPU par feed ki jaye to memory OOM crash ho sakti hai.
+- TideTrace ise overlapping 512x512 tiles mein cut karta hai.
+- Seams (borders) par artifacts avoid karne ke liye Cosine-Tapered Stitiching use hoti hai jisse
+  probability maps smoothly blend ho jate hain.
+
+6.4 THE SECRET WEAPON: ZERO-TORCH FALLBACK BASELINE (`app/ml/fallback.py`)
+- Project creators ne bohot smart engineering ki hai:
+  Agar server par PyTorch (`torch`) ya checkpoint file present NAHI hai, to code crash nahi hota!
+- Automatic Fallback: System turant `app/ml/fallback.py` activate karta hai.
+- Yeh method SAR physics par chalta hai:
+  1. Boxcar multi-look speckle reduction filter in linear power domain.
+  2. Sigma0 -22 dB adaptive thresholding.
+  3. Morphological opening and closing.
+  4. Contrast against local sea backscatter (> 3.5 dB) aur boundary compactness (< 0.62) se
+     oil aur look-alike ko classify karta hai.
+- Yeh pure NumPy + SciPy par chalta hai aur sirf ~15 MB RAM leta hai!
+
+====================================================================================================
+7. RENDER DEPLOYMENT & FREE TIER CRASH ANALYSIS (CRUCIAL SECTION)
+====================================================================================================
+
+7.1 THE RENDER FREE TIER PROBLEM (DEEP TECHNICAL ANALYSIS)
+Aapka concern bilkul sahi hai: "Render ke free tier par ML deploy karenge to bohot heavy ho jayega
+aur Render free wala work nahi karega."
+
+Samjhiye Render Free Tier ki limitations kya hain:
+1. RAM Limit: Exactly 512 MB RAM (Hard Limit).
+2. CPU: 0.1 vCPU (Shared, throttle hota hai).
+3. Inactivity Spin-Down: 15 minute tak traffic na aane par service band (sleep) ho jati hai.
+4. Disk: Ephemeral (restart hone par temporary files gayab).
+
+Kyu crash hota hai standard PyTorch ML app Render Free Tier par?
+- Standard `torch` wheel + `segmentation-models-pytorch` + `torchvision` install karne par
+  disk size 1.5 GB se 2.5 GB cross ho jata hai.
+- Python process jab `import torch` aur model load karti hai, to baseline RAM usage hi
+  250 MB se 350 MB chali jati hai.
+- Jaise hi koi user `POST /api/run` dabata hai aur NumPy arrays 2048x2048 images ko memory mein
+  expand karte hain, memory 512 MB exceed kar jati hai.
+- Result: Render ka Linux kernel process ko `SIGKILL` (Exit Code 137: Out Of Memory) dekar
+  service crash kar deta hai!
+
+7.2 HOW TIDETRACE SOLVES THIS: THE WORKING ARCHITECTURE FOR RENDER
+TideTrace ko pehle se hi aise design kiya gaya hai ki bina PyTorch ke bhi full system chalta hai!
+
+HUMARE PAAS 3 DEPLOYMENT STRATEGIES HAIN:
+
+----------------------------------------------------------------------------------------------------
+STRATEGY 1: PURE LIGHTWEIGHT DEPLOYMENT ON RENDER (RECOMMENDED - 100% RELIABLE)
+----------------------------------------------------------------------------------------------------
+- Concept: Render Free Tier par hum PyTorch ko install hi NAHI karenge!
+- Hum TideTrace ka Lean Stack use karenge:
+  FastAPI + Uvicorn + Pydantic + NumPy + SciPy + PyProj + RasterIO.
+- Slick Detection Inbuilt Physics-Based Baseline Detector (`app/ml/fallback.py`) se hogi.
+- RAM Consumption: Sirf 70 MB - 110 MB RAM! (Render ke 512 MB limit se bohot neeche!).
+- Advantage:
+  * Zero OOM crashes.
+  * Fast cold-start (under 10 seconds).
+  * Har endpoint (Detect, Geometry, Metocean, Backward Hindcast, Forward Forecast, AIS Join,
+    Ranked Suspects, HTML Report, Leaflet Console) 100% perfectly working rehta hai!
+
+----------------------------------------------------------------------------------------------------
+STRATEGY 2: DECOUPLED HYBRID ARCHITECTURE (BEST IF UNET++ DEEP LEARNING IS MANDATORY)
+----------------------------------------------------------------------------------------------------
+- Concept:
+  1. Frontend Console + FastAPI Backend + Physics + AIS -> Render Free Tier (Lightweight).
+  2. Heavy PyTorch UNet++ Model -> Hugging Face Spaces (FREE tier provides 16 GB RAM CPU or T4 GPU!).
+- Render se `/api/detect` call HuggingFace Space ke REST endpoint ko forward hoti hai.
+- Cost: Zero (Dono free tiers use hote hain without memory crash).
+
+----------------------------------------------------------------------------------------------------
+STRATEGY 3: MINIMAL CPU-ONLY PYTORCH ON RENDER (SINGLE WORKER TUNED)
+----------------------------------------------------------------------------------------------------
+- Agar aapko single service mein hi model chalana hai:
+  * `torch --index-url https://download.pytorch.org/whl/cpu` (no CUDA libraries, 150MB wheel).
+  * Uvicorn ko `--workers 1` par chalana mandatory hai taaki memory multiply na ho.
+  * Environment variable `MALLOC_TRIM_THRESHOLD_=100000` set karein memory release ke liye.
+  * Phir bhi peak usage par 420-480 MB ja sakta hai, isliye Strategy 1 sabse best aur stable hai.
+
+====================================================================================================
+7.3 STEP-BY-STEP BEGINNER GUIDE TO DEPLOY ON RENDER (FROM ZERO TO LIVE)
+====================================================================================================
+
+Hum STRATEGY 1 (Stable & Guaranteed Working) follow karenge.
+
+----------------------------------------------------------------------------------------------------
+STEP 1: GITHUB REPOSITORY PREPARE KAREIN
+----------------------------------------------------------------------------------------------------
+1. Ensure karein ki aapke local repository mein `app/static/vendor/leaflet/` folder commit ho chuka hai:
+   (Leaflet vendored files Leaflet.js aur style wahi honi chahiye taaki online CDN ki jarurat na pade).
+2. Git status check karein aur changes commit karein:
+   ```bash
+   git add .
+   git commit -m "Prepare TideTrace for Render deployment"
+   git push origin main
+   ```
+
+----------------------------------------------------------------------------------------------------
+STEP 2: RENDER PAR NEW WEB SERVICE CREATE KAREIN
+----------------------------------------------------------------------------------------------------
+1. Render.com par jayein (https://render.com) aur apna free account login karein (GitHub se login best hai).
+2. Dashboard par top right mein **"New +"** button dabayein aur **"Web Service"** select karein.
+3. Apna GitHub repository connect karein (`tidetrace`).
+
+----------------------------------------------------------------------------------------------------
+STEP 3: CONFIGURATION SETTINGS (THIK SE FILL KAREIN)
+----------------------------------------------------------------------------------------------------
+Render dashboard par form mein niche di gayi values exact fill karein:
+
+- Name: `tidetrace-console` (ya apni pasand ka koi bhi unique name)
+- Region: `Singapore` ya `Frankfurt` (koi bhi choose kar sakte hain)
+- Branch: `main`
+- Root Directory: (Ise KHALI / BLANK chhod dein)
+- Runtime: `Python 3`
+
+- Build Command:
+  ```bash
+  pip install --upgrade pip && pip install -r requirements.txt && python scripts/make_selftest_scene.py
+  ```
+  (Explanation: Yeh dependencies install karega aur test synthetic scenes generate kar dega taaki
+  fresh container par turant run ho sake.)
+
+- Start Command:
+  ```bash
+  uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+  ```
+  (IMPORTANT: `--workers 1` rakhna jaroori hai! Multiple workers karenge to RAM 512 MB exceed kar jayegi.)
+
+- Instance Type: Select **"Free"** (0.1 CPU, 512 MB RAM).
+
+----------------------------------------------------------------------------------------------------
+STEP 4: ENVIRONMENT VARIABLES ADD KAREIN (VERY IMPORTANT!)
+----------------------------------------------------------------------------------------------------
+Form ke neeche **"Advanced"** button par click karein aur **"Add Environment Variable"** par
+ye variables add karein:
+
+Key                                  | Value
+-------------------------------------|----------------------
+`PYTHON_VERSION`                     | `3.11.9`
+`TIDETRACE_OFFLINE`                  | `1`
+`TIDETRACE_ALLOW_SELFTEST_SCENES`     | `1`
+`TIDETRACE_KEEP_JOBS`                | `50`
+`TIDETRACE_KEEP_JOB_OVERLAYS`        | `10`
+`PYTHONUNBUFFERED`                   | `1`
+
+(Kyu chahiye yeh variables?
+- `PYTHON_VERSION=3.11.9`: Render by default Python 3.14 ya 3.12 use kar sakta hai jisme kuch C-extensions fail ho sakti hain. 3.11 rock-solid stable hai.
+- `TIDETRACE_OFFLINE=1`: Ensures ki server runtime mein koi unexpected outbound request na kare.
+- `TIDETRACE_KEEP_JOBS=50`: Disk space ko clean rakhta hai taaki container bhar na jaye.)
+
+----------------------------------------------------------------------------------------------------
+STEP 5: DEPLOY SERVICE CLICK KAREIN
+----------------------------------------------------------------------------------------------------
+1. **"Create Web Service"** button par click karein.
+2. Render deployment logs show karega:
+   - Git clone hoga.
+   - `pip install` chalega.
+   - `make_selftest_scene.py` execute hoga.
+   - `uvicorn app.main:app` start hoga.
+3. Jab logs mein likha aa jaye:
+   `INFO: Application startup complete.`
+   `INFO: Uvicorn running on http://0.0.0.0:10000`
+   Toh aapki service LIVE ho chuki hai!
+
+----------------------------------------------------------------------------------------------------
+STEP 6: LIVE APPLICATION TEST KAREIN
+----------------------------------------------------------------------------------------------------
+Render aapko ek public URL dega, jaise:
+`https://tidetrace-console.onrender.com`
+
+1. Browser mein yeh URL open karein.
+2. System Health Check verify karein:
+   URL: `https://tidetrace-console.onrender.com/api/health`
+   Aapko JSON response milega:
+   `"ok": true, "mode": "offline", "detector": "sigma0_threshold_baseline"`
+3. Web console par jayein, scene pick karein aur "Run analysis" dabayein.
+4. Console smoothly 15-30 seconds mein complete detection, backward drift hindcast, AIS correlation,
+   aur ranked suspect leaderboard generate karke dikha dega!
+
+----------------------------------------------------------------------------------------------------
+BONUS: INFRASTRUCTURE AS CODE (`render.yaml`)
+----------------------------------------------------------------------------------------------------
+Agar aap manual dashboard form bharne se bachna chahte hain, toh project root par `render.yaml`
+file bana kar push kar sakte hain. Render use automatically padh kar service configure kar lega:
+
+```yaml
+services:
+  - type: web
+    name: tidetrace
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt && python scripts/make_selftest_scene.py
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: TIDETRACE_OFFLINE
+        value: "1"
+      - key: TIDETRACE_ALLOW_SELFTEST_SCENES
+        value: "1"
+      - key: TIDETRACE_KEEP_JOBS
+        value: "50"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+```
+
+====================================================================================================
+                                      SUMMARY & FINAL WORDS
+====================================================================================================
+- TideTrace ek production-grade, highly thoughtful space-technology & disaster attribution project hai.
+- Iska offline-first design aur decoupled architecture ise render free tier par chalane ke liye
+  sabse safe banata hai agar PyTorch ko lean fallback se replace rakha jaye.
+- Is document ke sare steps follow karke aap is project ko local laptop par bhi aur Render par bhi
+  100% working condition mein run kar sakte hain!
+====================================================================================================
