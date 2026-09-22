@@ -119,7 +119,7 @@ def _asset_stamp() -> str:
     return h.hexdigest()[:12]
 
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def index():
     """Serve the console shell uncached, with content-addressed asset URLs.
 

@@ -5,12 +5,17 @@ venv/
 .pytest_cache/
 *.egg-info/
 
-# Data is fetched by scripts, not committed. See README.
+# Data is fetched by scripts, but whitelist demo files for production deployment
 data/sar/*.tif
 data/sar/*.tiff
-data/metocean/*.npz
+!data/sar/gom_mc20_chronic_slick.tif
+!data/sar/selftest_synthetic*.tif
+!data/sar/arabian_sea_mumbai_offshore.tif
 data/metocean/*.nc
+data/metocean/*.npz
+!data/metocean/*.npz
 data/ais/*.sqlite
+!data/ais/ais.sqlite
 data/ais/*.csv
 data/jobs/*.json
 data/cache/
@@ -18,7 +23,7 @@ data/zenodo/
 data/tiles/
 models/*.pt
 
-# Keep the scene index so a checkout knows what it should fetch.
+# Keep the scene index and assets so a checkout has a working demo
 !data/sar/scenes.json
 
 .pytest_cache/
@@ -32,11 +37,13 @@ kaggle.json
 .huggingface/
 
 # Land mask is fetched by scripts/build_land_mask.py
-data/land/
+data/land/*
+!data/land/*.json
 
 # Cached basemap tiles, optical corroboration chips and the world coastline are
 # all rebuilt by scripts/. Only the small manifests are worth tracking.
-data/basemap/
+data/basemap/*
+!data/basemap/manifest.json
 data/optical/*.png
 data/optical/*.jpg
 
